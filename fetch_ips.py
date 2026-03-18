@@ -1,49 +1,91 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
-#   
-#   Author  :   XueWeiHan
-#   E-mail  :   595666367@qq.com
-#   Date    :   2020-05-19 15:27
-#   Desc    :   获取最新的 GitHub 相关域名对应 IP
+#
+#   Author      :   aoaim
+#   Orig Author :   XueWeiHan
+#   Date        :   2025-03-18
+#   Desc        :   获取 GitHub 域名的最优 IP 地址，使用 TCP 连接测试无需 root 权限
 import re
+import socket
+import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 import sys
 import asyncio
 import aiodns
 
-from pythonping import ping
 from requests_html import HTMLSession
 from retry import retry
 
 from common import GITHUB_URLS, write_hosts_content
 
 
-PING_TIMEOUT_SEC: int = 1
+TCP_TIMEOUT_SEC: float = 2.0
 DISCARD_LIST: List[str] = ["1.0.1.1", "1.2.1.1", "127.0.0.1"]
 
 
-PING_LIST: Dict[str, int] = dict()
+TCP_LIST: Dict[str, float] = dict()
 
 
-def ping_cached(ip: str) -> int:
-    global PING_LIST
-    if ip in PING_LIST:
-        return PING_LIST[ip]
-    ping_times = [ping(ip, timeout=PING_TIMEOUT_SEC).rtt_avg_ms for _ in range(3)]
-    ping_times.sort()
-    print(f'Ping {ip}: {ping_times} ms')
-    PING_LIST[ip] = ping_times[1] # 取中位数
-    return PING_LIST[ip]
+def tcp_connect_time(ip: str, port: int = 80) -> float:
+    """使用 TCP 连接测试延迟，不需要 root 权限"""
+    global TCP_LIST
+    if ip in TCP_LIST:
+        return TCP_LIST[ip]
+    
+    times = []
+    for _ in range(3):
+        try:
+            start = time.time()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(TCP_TIMEOUT_SEC)
+            sock.connect((ip, port))
+            sock.close()
+            elapsed = (time.time() - start) * 1000  # 转换为毫秒
+            times.append(elapsed)
+        except (socket.timeout, socket.error, OSError):
+            times.append(TCP_TIMEOUT_SEC * 1000)
+    
+    times.sort()
+    result = times[1]  # 取中位数
+    print(f'TCP connect {ip}:{port}: {result:.1f} ms')
+    TCP_LIST[ip] = result
+    return result
 
 
 def select_ip_from_list(ip_list: List[str]) -> Optional[str]:
     if len(ip_list) == 0:
         return None
-    ping_results = [(ip, ping_cached(ip)) for ip in ip_list]
-    ping_results.sort(key=lambda x: x[1])
-    best_ip = ping_results[0][0]
-    print(f"{ping_results}, selected {best_ip}")
+    
+    # 测试每个 IP 的 TCP 连接延迟
+    tcp_results = []
+    for ip in ip_list:
+        try:
+            delay = tcp_connect_time(ip, 443)  # 测试 HTTPS 端口
+            tcp_results.append((ip, delay))
+        except Exception as e:
+            print(f"  Error testing {ip}: {e}")
+            tcp_results.append((ip, TCP_TIMEOUT_SEC * 1000))
+    
+    # 按延迟排序
+    tcp_results.sort(key=lambda x: x[1])
+    
+    # 优先选择能正常连接（未超时）的 IP
+    timeout_threshold = TCP_TIMEOUT_SEC * 1000
+    working_ips = [(ip, delay) for ip, delay in tcp_results if delay < timeout_threshold]
+    
+    if working_ips:
+        # 有能连接的 IP，选择延迟最低的
+        best_ip = working_ips[0][0]
+        best_delay = working_ips[0][1]
+        print(f"Results: {[(ip, f'{delay:.1f}ms') for ip, delay in tcp_results[:5]]}")
+        print(f"Selected working IP: {best_ip} ({best_delay:.1f}ms)")
+    else:
+        # 全都超时，选择延迟最低的那个（会标记为 Timeout）
+        best_ip = tcp_results[0][0]
+        print(f"Results: {[(ip, f'{delay:.1f}ms') for ip, delay in tcp_results[:5]]}")
+        print(f"All IPs timeout, selected best: {best_ip}")
+    
     return best_ip
 
 
@@ -65,16 +107,23 @@ def get_ip_list_from_ipaddress_com(session: Any, github_url: str) -> Optional[Li
 
 
 DNS_SERVER_LIST = [
-    "1.1.1.1",  # Cloudflare
-    "8.8.8.8",  # Google
+    "1.1.1.1",      # Cloudflare
+    "8.8.8.8",      # Google
+    "9.9.9.9",      # Quad9
+    "119.29.29.29", # DNSPod (腾讯)
+    "223.5.5.5",    # AliDNS (阿里)
+    "180.184.1.1",  # ByteDNS (字节跳动)
     "101.101.101.101",  # Quad101
     "101.102.103.104",  # Quad101
+    "114.114.114.114",  # 114DNS
+    "182.254.116.116",  # DNSPod 备用
+    "1.2.4.8",          # CNNIC
+    "208.67.222.222",   # OpenDNS
 ]
 
 
 def windows_compatibility_check():
     if sys.platform == "win32":
-        # 检查 pycares 是否正常加载
         try:
             import pycares
         except ImportError:
@@ -84,19 +133,24 @@ def windows_compatibility_check():
 async def get_ip_list_from_dns(
     domain,
     record_type="A",
-    dns_server_list=["1.2.4.8", "114.114.114.114"],
+    dns_server_list=None,
 ):
-    # Windows 兼容性检查
+    if dns_server_list is None:
+        dns_server_list = DNS_SERVER_LIST
     windows_compatibility_check()
-
-    # 配置 DNS 服务器
     resolver = aiodns.DNSResolver()
     resolver.nameservers = dns_server_list
 
     try:
-        # 执行异步查询
-        result = await resolver.query(domain, record_type)
-        return [answer.host for answer in result]
+        result = await resolver.query_dns(domain, record_type)
+        # query_dns returns DNSResult with answer list
+        ip_list = []
+        for record in result.answer:
+            # Get IP address from A record
+            addr = getattr(record.data, 'addr', None)
+            if addr:
+                ip_list.append(addr)
+        return ip_list
     except aiodns.error.DNSError as e:
         print(f"{domain}: DNS 查询失败: {e}")
         return []
@@ -128,9 +182,12 @@ async def get_ip(session: Any, github_url: str) -> Optional[str]:
 async def main() -> None:
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f'{current_time} - Start script.')
+
     session = HTMLSession()
     content = ""
     content_list = []
+    success_count = 0
+
     for index, github_url in enumerate(GITHUB_URLS):
         print(f'Start Processing url: {index + 1}/{len(GITHUB_URLS)}, {github_url}')
         try:
@@ -139,22 +196,35 @@ async def main() -> None:
                 print(f"{github_url}: IP Not Found")
                 ip = "# IP Address Not Found"
             content += ip.ljust(30) + github_url
-            global PING_LIST
-            if PING_LIST.get(ip) is not None and PING_LIST.get(ip) == PING_TIMEOUT_SEC * 1000:
+            global TCP_LIST
+            if TCP_LIST.get(ip) is not None and TCP_LIST.get(ip) >= TCP_TIMEOUT_SEC * 1000:
                 content += "  # Timeout"
             content += "\n"
             content_list.append((ip, github_url,))
+            success_count += 1
         except Exception:
             continue
 
+    # 检查是否成功获取了数据
+    if success_count == 0:
+        print("✗ 未能获取任何 IP，保留旧 hosts 文件")
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{current_time} - End script.')
+        return
+
+    # 成功获取数据后，删除旧文件
+    import os
+    for f in ['hosts', 'hosts.json']:
+        if os.path.exists(f):
+            os.remove(f)
+            print(f'已删除旧文件: {f}')
+
     write_hosts_content(content, content_list)
-    # print(hosts_content)
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f'{current_time} - End script.')
 
 
 if __name__ == "__main__":
     if sys.platform == "win32":
-        # Windows 事件循环策略配置
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
