@@ -1,0 +1,35 @@
+name: Fetch GitHub IPs
+
+on:
+  schedule:
+    # 每周日 UTC 14:00 运行
+    - cron: '0 14 * * 0'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  fetch-ips:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.14'
+        
+    - name: Install dependencies
+      run: |
+        pip install requests-html dnspython retry
+        
+    - name: Fetch IP addresses
+      run: python .github/scripts/fetch_ips_action.py
+      working-directory: ${{ github.workspace }}
+      
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add raw_ips.json
+        git diff --cached --quiet || (git commit -m "chore: update raw IPs from cloud" && git push)
