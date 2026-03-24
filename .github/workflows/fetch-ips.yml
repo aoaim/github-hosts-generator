@@ -1,4 +1,4 @@
-name: Fetch GitHub IPs
+name: Fetch Target IPs
 
 on:
   schedule:
@@ -31,5 +31,5 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add raw_ips.json
+        git add output/raw_ips.json
         git diff --cached --quiet || (git commit -m "chore: update raw IPs from cloud" && git push)
