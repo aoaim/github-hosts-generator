@@ -21,7 +21,7 @@ jobs:
         
     - name: Install dependencies
       run: |
-        pip install httpx dnspython tenacity
+        pip install dnspython
         
     - name: Fetch IP addresses
       run: python .github/scripts/fetch_ips_action.py

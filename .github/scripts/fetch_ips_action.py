@@ -6,16 +6,14 @@
 #   输出: raw_ips.json
 #
 import json
-import re
 import importlib.util
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, UTC
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-import httpx
 import dns.resolver
-from tenacity import retry, stop_after_attempt, wait_fixed
 
 
 def load_github_urls() -> list[str]:
@@ -87,40 +85,11 @@ def get_ip_list_from_dns(domain, dns_servers=None):
     print(f"  DNS query done: {domain}, unique A records: {len(ips)}")
     return list(ips)
 
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
-def get_ip_list_from_ipaddress_com(session, domain):
-    """从 ipaddress.com 抓取 IP 列表"""
-    url = f'https://sites.ipaddress.com/{domain}'
-    headers = {
-        'User-Agent': 'curl/7.81.0'
-    }
-    
-    try:
-        rs = session.get(url, headers=headers)
-        rs.raise_for_status()
-        # 匹配页面中的 IP 地址
-        pattern = r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"
-        ip_list = re.findall(pattern, rs.text)
-        # 过滤无效 IP
-        valid_ips = [ip for ip in ip_list if ip not in ["1.0.1.1", "1.2.1.1", "127.0.0.1"]]
-        return valid_ips
-    except Exception as ex:
-        print(f"  ipaddress.com query failed for {domain}: {ex}")
-        return []
-
-
 def process_domain(domain):
     print(f"\nProcessing: {domain}")
     all_ips = set()
 
-    with httpx.Client(timeout=10.0, follow_redirects=True) as session:
-        # 1. 从 ipaddress.com 获取
-        ip_list_web = get_ip_list_from_ipaddress_com(session, domain)
-    all_ips.update(ip_list_web)
-    print(f"  ipaddress.com IPs: {len(ip_list_web)}")
-
-    # 2. 从国际 DNS 获取（并发）
+    # 从国际 DNS 获取（并发）
     ip_list_dns = get_ip_list_from_dns(domain)
     all_ips.update(ip_list_dns)
     print(f"  DNS IPs: {len(ip_list_dns)}")
@@ -161,7 +130,7 @@ def main():
     
     # 写入 raw_ips.json
     output = {
-        "update_time": __import__('datetime').datetime.utcnow().isoformat() + "Z",
+        "update_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "source": "github-action",
         "data": results
     }
