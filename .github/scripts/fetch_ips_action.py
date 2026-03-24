@@ -9,6 +9,7 @@ import json
 import re
 import importlib.util
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -33,14 +34,17 @@ def load_github_urls() -> list[str]:
 
 GITHUB_URLS = load_github_urls()
 
+DNS_TIMEOUT_SEC = 2.0
+DNS_LIFETIME_SEC = 2.0
+DNS_WORKERS = 12
+DOMAIN_WORKERS = 8
+
 
 # 国际权威 DNS 服务器
 INTERNATIONAL_DNS = [
     # 国际
     "8.8.8.8",          # Google
-    "8.8.4.4",          # Google secondary
     "1.1.1.1",          # Cloudflare
-    "1.0.0.1",          # Cloudflare secondary
     "9.9.9.9",          # Quad9
     "208.67.222.222",   # OpenDNS
     # DNS.SB (德国/全球多节点)
@@ -48,17 +52,10 @@ INTERNATIONAL_DNS = [
     "45.11.45.11",      # DNS.SB secondary
     # Level 3 Parent DNS (美国)
     "4.2.2.1",
-    "4.2.2.2",
-    "4.2.2.3",
-    "4.2.2.4",
-    "4.2.2.5",
-    "4.2.2.6",
     # 台湾
     "101.101.101.101",  # TWNIC Quad101
-    "101.102.103.104",  # TWNIC Quad101 secondary
     # 香港
     "202.14.67.4",      # PCCW
-    "202.14.67.14",     # PCCW secondary
     "203.80.64.66",     # HKBN
     # 新加坡
     "165.21.83.88",     # SingTel
@@ -69,28 +66,31 @@ INTERNATIONAL_DNS = [
 ]
 
 
+def query_dns(domain, dns_server):
+    resolver = dns.resolver.Resolver()
+    resolver.nameservers = [dns_server]
+    resolver.timeout = DNS_TIMEOUT_SEC
+    resolver.lifetime = DNS_LIFETIME_SEC
+    answers = resolver.resolve(domain, 'A')
+    return [rdata.address for rdata in answers]
+
+
 def get_ip_list_from_dns(domain, dns_servers=None):
-    """从指定 DNS 服务器查询域名 IP"""
+    """从指定 DNS 服务器并发查询域名 IP"""
     if dns_servers is None:
         dns_servers = INTERNATIONAL_DNS
-    
+
     ips = set()
-    
-    for dns_server in dns_servers:
-        try:
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = [dns_server]
-            resolver.timeout = 5
-            resolver.lifetime = 5
-            
-            answers = resolver.resolve(domain, 'A')
-            for rdata in answers:
-                ips.add(rdata.address)
-                
-        except Exception as e:
-            print(f"  DNS {dns_server} query failed for {domain}: {e}")
-            continue
-    
+    max_workers = min(DNS_WORKERS, len(dns_servers))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(query_dns, domain, dns_server): dns_server for dns_server in dns_servers}
+        for future in as_completed(futures):
+            dns_server = futures[future]
+            try:
+                ips.update(future.result())
+            except Exception as e:
+                print(f"  DNS {dns_server} query failed for {domain}: {e}")
+
     return list(ips)
 
 
@@ -116,6 +116,26 @@ def get_ip_list_from_ipaddress_com(session, domain):
         return []
 
 
+def process_domain(domain):
+    print(f"\nProcessing: {domain}")
+    all_ips = set()
+
+    with httpx.Client(timeout=10.0, follow_redirects=True) as session:
+        # 1. 从 ipaddress.com 获取
+        ip_list_web = get_ip_list_from_ipaddress_com(session, domain)
+    all_ips.update(ip_list_web)
+    print(f"  ipaddress.com IPs: {len(ip_list_web)}")
+
+    # 2. 从国际 DNS 获取（并发）
+    ip_list_dns = get_ip_list_from_dns(domain)
+    all_ips.update(ip_list_dns)
+    print(f"  DNS IPs: {len(ip_list_dns)}")
+
+    ip_list = sorted(all_ips)
+    print(f"  Total unique IPs: {len(ip_list)}")
+    return domain, ip_list
+
+
 def main():
     print("=" * 60)
     print("Fetching GitHub IPs from cloud (GitHub Action)")
@@ -123,29 +143,16 @@ def main():
     
     results = {}
 
-    with httpx.Client(timeout=10.0, follow_redirects=True) as session:
-        for idx, domain in enumerate(GITHUB_URLS, 1):
-            print(f"\n[{idx}/{len(GITHUB_URLS)}] Processing: {domain}")
-
-            all_ips = set()
-
-            # 1. 从 ipaddress.com 获取
-            print("  Querying ipaddress.com...")
-            ip_list_web = get_ip_list_from_ipaddress_com(session, domain)
-            all_ips.update(ip_list_web)
-            print(f"    Found {len(ip_list_web)} IPs")
-
-            # 2. 从国际 DNS 获取
-            print("  Querying international DNS...")
-            ip_list_dns = get_ip_list_from_dns(domain)
-            all_ips.update(ip_list_dns)
-            print(f"    Found {len(ip_list_dns)} IPs")
-
-            # 去重并排序
-            ip_list = sorted(list(all_ips))
-            results[domain] = ip_list
-
-            print(f"  Total unique IPs: {len(ip_list)}")
+    with ThreadPoolExecutor(max_workers=DOMAIN_WORKERS) as executor:
+        future_map = {executor.submit(process_domain, domain): domain for domain in GITHUB_URLS}
+        for future in as_completed(future_map):
+            domain = future_map[future]
+            try:
+                domain_name, ip_list = future.result()
+                results[domain_name] = ip_list
+            except Exception as e:
+                print(f"Failed processing {domain}: {e}")
+                results[domain] = []
     
     # 写入 raw_ips.json
     output = {
