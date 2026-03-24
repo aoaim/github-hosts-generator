@@ -9,9 +9,9 @@ import os
 import json
 from datetime import datetime, timezone, timedelta
 
-HOSTS_TEMPLATE = """# GitHub520 Host Start
+HOSTS_TEMPLATE = """# GitHub Hosts Generator Start
 {content}# Update time: {update_time}
-# GitHub520 Host End
+# GitHub Hosts Generator End
 """
 
 

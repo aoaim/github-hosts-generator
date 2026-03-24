@@ -1,4 +1,4 @@
-# GitHub520
+# GitHub Hosts Generator
 
 在本地根据云端收集的候选 IP 自动测试连通性，生成可用的 GitHub hosts 映射，改善中国大陆网络环境下的访问稳定性。
 
