@@ -7,17 +7,31 @@
 #
 import json
 import re
-import sys
+import importlib.util
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
 
 import httpx
 import dns.resolver
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-from domains import GITHUB_URLS
+
+def load_github_urls() -> list[str]:
+    domains_path = PROJECT_ROOT / "domains.py"
+    spec = importlib.util.spec_from_file_location("domains", domains_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load domains module from: {domains_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    urls = getattr(module, "GITHUB_URLS", None)
+    if not isinstance(urls, list):
+        raise RuntimeError("GITHUB_URLS is missing or invalid in domains.py")
+    return urls
+
+
+GITHUB_URLS = load_github_urls()
 
 
 # 国际权威 DNS 服务器
