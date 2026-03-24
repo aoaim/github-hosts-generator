@@ -12,6 +12,7 @@ from hostsgen.io import HostEntry, ensure_output_dir, write_hosts_content, write
 
 TCP_TIMEOUT_SEC = 2.0
 TEST_PORT = 443
+TCP_SAMPLE_COUNT = 5
 DISCARD_LIST = {"1.0.1.1", "1.2.1.1", "127.0.0.1"}
 MISSING_IP_PLACEHOLDER = "# IP Address Not Found"
 
@@ -41,13 +42,13 @@ def load_candidates(raw_data: dict[str, list[str]], domain: str) -> list[str]:
 
 
 def tcp_connect_time(ip: str, port: int = TEST_PORT) -> float:
-    """Measure median TCP connect time over three attempts."""
+    """Measure median TCP connect time over repeated attempts."""
     cached = TCP_CACHE.get(ip)
     if cached is not None:
         return cached
 
     times = []
-    for _ in range(3):
+    for _ in range(TCP_SAMPLE_COUNT):
         try:
             start = time.time()
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -58,7 +59,7 @@ def tcp_connect_time(ip: str, port: int = TEST_PORT) -> float:
         except (socket.timeout, socket.error, OSError):
             times.append(TCP_TIMEOUT_SEC * 1000)
 
-    result = sorted(times)[1]
+    result = sorted(times)[TCP_SAMPLE_COUNT // 2]
     TCP_CACHE[ip] = result
     return result
 
